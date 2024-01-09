@@ -62,15 +62,8 @@ func (r realFetcher) Fetch(url string) (body string, urls []string, err error) {
 	}
 }
 
-// Crawl recursively crawls pages starting with the given URL
-func Crawl(url string, depth int, fetcher Fetcher, ch chan Res, errs chan error, ctx context.Context, wg *sync.WaitGroup, mu *sync.Mutex, followExternalLinks bool) {
+func Crawl(url string, depth int, fetcher Fetcher, ch chan Res, errs chan error, wg *sync.WaitGroup, mu *sync.Mutex, followExternalLinks bool) {
 	defer wg.Done()
-
-	select {
-	case <-ctx.Done():
-		return
-	default:
-	}
 
 	mu.Lock()
 	visited.Store(url, true)
@@ -82,27 +75,28 @@ func Crawl(url string, depth int, fetcher Fetcher, ch chan Res, errs chan error,
 		return
 	}
 
+	imageURLs := ExtractImages(body, url)
+	for _, imgURL := range imageURLs {
+		DownloadImage(imgURL, "D:\\awesomeProject\\images")
+	}
+
 	newUrls := 0
 	if depth > 1 {
 		for _, u := range urls {
 			if followExternalLinks || isInternalLink(url, u) {
-				//mu.Lock()
 				_, alreadyVisited := visited.Load(u)
 				if !alreadyVisited {
 					newUrls++
 					wg.Add(1)
-					go Crawl(u, depth-1, fetcher, ch, errs, ctx, wg, mu, followExternalLinks)
+					go Crawl(u, depth-1, fetcher, ch, errs, wg, mu, followExternalLinks)
 				}
-				//mu.Unlock()
 			}
 		}
 	}
 
-	// Send the result along with the number of URLs to be fetched
 	ch <- Res{url, body, newUrls}
 }
 
-// Res represents the result of crawling a URL
 type Res struct {
 	url   string
 	body  string
@@ -115,17 +109,14 @@ func main() {
 
 	ch := make(chan Res)
 	errs := make(chan error)
-	//visited := map[string]bool{}
-	imageURLs := []string{}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	//https://rarehistoricalphotos.com
-	// Use realFetcher for actual web crawling
+
 	wg.Add(1)
-	go Crawl("https://rarehistoricalphotos.com", 3, realFetcher{}, ch, errs, ctx, &wg, &mu, *followExternalLinks)
+	go Crawl("https://rarehistoricalphotos.com", 3, realFetcher{}, ch, errs, &wg, &mu, *followExternalLinks)
 
 	toCollect := 1
 	for n := 0; n < toCollect; n++ {
@@ -133,7 +124,6 @@ func main() {
 		case s := <-ch:
 			fmt.Printf("found: %s\n", s.url)
 			toCollect += s.found
-			imageURLs = append(imageURLs, ExtractImages(s.body, s.url)...)
 		case e := <-errs:
 			fmt.Println(e)
 		case <-ctx.Done():
@@ -141,11 +131,11 @@ func main() {
 		}
 	}
 
-	// Wait for all goroutines to finish before exiting
 	wg.Wait()
-
-	DownloadImages(imageURLs, "D:\\awesomeProject\\images")
+	close(ch)
+	close(errs)
 }
+
 func ExtractImages(body string, url string) []string {
 	var imageURLs []string
 
@@ -159,7 +149,8 @@ func ExtractImages(body string, url string) []string {
 			token := tokenizer.Token()
 			if token.Data == "img" {
 				for _, attr := range token.Attr {
-					if attr.Key == "src" {
+					if attr.Key == "src" && strings.Contains(attr.Val, ".") {
+						//fmt.Println("KAK IZGLEJDALINKA", attr.Val)
 						if strings.Contains(attr.Val, "http") {
 							imageURLs = append(imageURLs, attr.Val)
 						} else {
@@ -172,44 +163,39 @@ func ExtractImages(body string, url string) []string {
 	}
 }
 
-// DownloadImages downloads and saves images to the specified directory
-func DownloadImages(imageURLs []string, directory string) {
-	for _, url := range imageURLs {
-		resp, err := http.Get(url)
-		if err != nil {
-			fmt.Printf("Error downloading image from %s: %v\n", url, err)
-			continue
-		}
-		defer resp.Body.Close()
-
-		// Extract the file name from the URL
-		fileName := filepath.Base(url)
-		fileName = sanitizeFileName(fileName)
-
-		// Create the file in the specified directory
-		filePath := filepath.Join(directory, fileName)
-		file, err := os.Create(filePath)
-		if err != nil {
-			fmt.Printf("Error creating file for %s: %v\n", url, err)
-			continue
-		}
-		defer file.Close()
-
-		// Write the image content to the file
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Printf("Error reading image content from %s: %v\n", url, err)
-			continue
-		}
-		_, err = file.Write(body)
-		if err != nil {
-			fmt.Printf("Error writing image content to file for %s: %v\n", url, err)
-			continue
-		}
-
-		fmt.Printf("Downloaded and saved image: %s\n", filePath)
+func DownloadImage(imgURL string, directory string) {
+	resp, err := http.Get(imgURL)
+	if err != nil {
+		fmt.Printf("Error downloading image from %s: %v\n", imgURL, err)
+		return
 	}
+	defer resp.Body.Close()
+
+	fileName := filepath.Base(imgURL)
+	fileName = sanitizeFileName(fileName)
+
+	filePath := filepath.Join(directory, fileName)
+	file, err := os.Create(filePath)
+	if err != nil {
+		fmt.Printf("Error creating file for %s: %v\n", imgURL, err)
+		return
+	}
+	defer file.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Error reading image content from %s: %v\n", imgURL, err)
+		return
+	}
+	_, err = file.Write(body)
+	if err != nil {
+		fmt.Printf("Error writing image content to file for %s: %v\n", imgURL, err)
+		return
+	}
+
+	fmt.Printf("Downloaded and saved image: %s\n", filePath)
 }
+
 func sanitizeFileName(name string) string {
 	parts := strings.Split(name, "?")
 	return parts[0]
